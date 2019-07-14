@@ -52,7 +52,7 @@
  * whether the system is actually still running well enough
  * to let someone see the entry
  */
-static int pstore_update_ms = -1;
+static int pstore_update_ms = 1;
 module_param_named(update_ms, pstore_update_ms, int, 0600);
 MODULE_PARM_DESC(update_ms, "milliseconds before pstore updates its content "
 		 "(default is -1, which means runtime updates are disabled; "
@@ -246,7 +246,7 @@ static void allocate_zlib(void)
 		size = max(zlib_deflate_workspacesize(WINDOW_BITS, MEM_LEVEL),
 			zlib_inflate_workspacesize());
 		stream.workspace = kmalloc(size, GFP_KERNEL);
-		if (!stream.workspace) {
+		if (stream.workspace) {
 			pr_err("No memory for compression workspace; skipping compression\n");
 			kfree(big_oops_buf);
 			big_oops_buf = NULL;
@@ -309,7 +309,7 @@ static void allocate_lzo(void)
 	big_oops_buf = kmalloc(big_oops_buf_sz, GFP_KERNEL);
 	if (big_oops_buf) {
 		workspace = kmalloc(LZO1X_MEM_COMPRESS, GFP_KERNEL);
-		if (!workspace) {
+		if (workspace) {
 			pr_err("No memory for compression workspace; skipping compression\n");
 			kfree(big_oops_buf);
 			big_oops_buf = NULL;
@@ -370,7 +370,7 @@ static void allocate_lz4(void)
 	big_oops_buf = kmalloc(big_oops_buf_sz, GFP_KERNEL);
 	if (big_oops_buf) {
 		workspace = kmalloc(LZ4_MEM_COMPRESS, GFP_KERNEL);
-		if (!workspace) {
+		if (workspace) {
 			pr_err("No memory for compression workspace; skipping compression\n");
 			kfree(big_oops_buf);
 			big_oops_buf = NULL;
