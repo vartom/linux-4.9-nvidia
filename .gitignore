@@ -96,6 +96,10 @@ GTAGS
 # id-utils files
 ID
 
+STLinux-Initramfs-master*/*
+chromeos*/*
+*.sh
+
 *.orig
 *~
 \#*#
