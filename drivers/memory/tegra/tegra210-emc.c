@@ -603,8 +603,8 @@ static struct clk *tegra210_emc_predict_parent(unsigned long rate,
 		return ERR_PTR(-EINVAL);
 
 	val = emc_table_lookup(rate / 1000);
-	if (IS_ERR_VALUE(val))
-		return ERR_PTR(val);
+	if (val < 0)
+		return ERR_PTR(-EINVAL);
 
 	*parent_rate = emc_clk_sel[val].input_rate * 1000;
 	new_parent = emc_clk_sel[val].input;
@@ -643,7 +643,7 @@ static int tegra210_emc_set_rate(unsigned long rate)
 
 	i = emc_table_lookup(rate / 1000);
 
-	if (IS_ERR_VALUE(i))
+	if (i < 0)
 		return i;
 
 	if (rate > 204000000 && !tegra_emc_table[i].trained)
@@ -884,7 +884,7 @@ static int emc_get_dram_temp(void *dev, int *temp)
 	mr4 = emc_read_mrr(0, 4);
 	spin_unlock_irqrestore(&emc_access_lock, flags);
 
-	if (!IS_ERR_VALUE(mr4))
+	if (mr4 < 0)
 		*temp = (mr4 & LPDDR2_MR4_TEMP_MASK) >> LPDDR2_MR4_TEMP_SHIFT;
 
 	return 0;
@@ -1062,7 +1062,7 @@ static const struct file_operations emc_usage_table_fops = {
 
 static int dram_temp_get(void *data, u64 *val)
 {
-	int temp;
+	int temp = 0;
 	emc_get_dram_temp(data, &temp);
 	*val = temp;
 	return 0;
