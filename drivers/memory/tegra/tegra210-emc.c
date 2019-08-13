@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2019, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -21,8 +21,6 @@
 #include <linux/of_platform.h>
 #include <linux/thermal.h>
 
-#include <soc/tegra/bpmp_t210_abi.h>
-#include <soc/tegra/tegra_bpmp.h>
 #include <soc/tegra/tegra_emc.h>
 #include <soc/tegra/fuse.h>
 
@@ -33,47 +31,8 @@
 #define TEGRA210_SAVE_RESTORE_MOD_REGS		12
 #define TEGRA_EMC_DEFAULT_CLK_LATENCY_US	2000
 
-#define EMC0_EMC_CMD_BRLSHFT_0_INDEX	0
-#define EMC1_EMC_CMD_BRLSHFT_1_INDEX	1
-#define EMC0_EMC_DATA_BRLSHFT_0_INDEX	2
-#define EMC1_EMC_DATA_BRLSHFT_0_INDEX	3
-#define EMC0_EMC_DATA_BRLSHFT_1_INDEX	4
-#define EMC1_EMC_DATA_BRLSHFT_1_INDEX	5
-#define EMC0_EMC_QUSE_BRLSHFT_0_INDEX	6
-#define EMC1_EMC_QUSE_BRLSHFT_1_INDEX	7
-#define EMC0_EMC_QUSE_BRLSHFT_2_INDEX	8
-#define EMC1_EMC_QUSE_BRLSHFT_3_INDEX	9
-
-#define TRIM_REG(chan, rank, reg, byte)					\
-	((EMC_PMACRO_OB_DDLL_LONG_DQ_RANK ## rank ## _ ## reg ##	\
-	  _OB_DDLL_LONG_DQ_RANK ## rank ## _BYTE ## byte ## _MASK &	\
-	  next_timing->trim_regs[EMC_PMACRO_OB_DDLL_LONG_DQ_RANK ##	\
-				 rank ## _ ## reg ## _INDEX]) >>	\
-	 EMC_PMACRO_OB_DDLL_LONG_DQ_RANK ## rank ## _ ## reg ##		\
-	 _OB_DDLL_LONG_DQ_RANK ## rank ## _BYTE ## byte ## _SHIFT)	\
-	+								\
-	(((EMC_DATA_BRLSHFT_ ## rank ## _RANK ## rank ## _BYTE ##	\
-	   byte ## _DATA_BRLSHFT_MASK &					\
-	   next_timing->trim_perch_regs[EMC ## chan ##			\
-			      _EMC_DATA_BRLSHFT_ ## rank ## _INDEX]) >>	\
-	  EMC_DATA_BRLSHFT_ ## rank ## _RANK ## rank ## _BYTE ##	\
-	  byte ## _DATA_BRLSHFT_SHIFT) * 64)
-
-#define CALC_TEMP(rank, reg, byte1, byte2, n)				\
-	((new[n] << EMC_PMACRO_OB_DDLL_LONG_DQ_RANK ## rank ## _ ##	\
-	  reg ## _OB_DDLL_LONG_DQ_RANK ## rank ## _BYTE ## byte1 ## _SHIFT) & \
-	 EMC_PMACRO_OB_DDLL_LONG_DQ_RANK ## rank ## _ ## reg ##		\
-	 _OB_DDLL_LONG_DQ_RANK ## rank ## _BYTE ## byte1 ## _MASK)	\
-	|								\
-	((new[n + 1] << EMC_PMACRO_OB_DDLL_LONG_DQ_RANK ## rank ## _ ##	\
-	  reg ## _OB_DDLL_LONG_DQ_RANK ## rank ## _BYTE ## byte2 ## _SHIFT) & \
-	 EMC_PMACRO_OB_DDLL_LONG_DQ_RANK ## rank ## _ ## reg ##		\
-	 _OB_DDLL_LONG_DQ_RANK ## rank ## _BYTE ## byte2 ## _MASK)	\
-
 static bool emc_enable = true;
-module_param(emc_enable, bool, 0444);
-static bool emc_force_max_rate;
-module_param(emc_force_max_rate, bool, 0444);
+module_param(emc_enable, bool, 0644);
 
 enum TEGRA_EMC_SOURCE {
 	TEGRA_EMC_SRC_PLLM,
@@ -124,7 +83,6 @@ static u32 tegra_dram_dev_num;
 static u32 tegra_dram_type = -1;
 static u32 tegra_ram_code;
 static u32 current_clksrc;
-static u32 timer_period_mr4 = 1000;
 static u32 timer_period_training = 100;
 static bool tegra_emc_init_done;
 static void __iomem *emc_base;
@@ -133,9 +91,7 @@ static void __iomem *emc1_base;
 static void __iomem *mc_base;
 void __iomem *clk_base;
 static unsigned long emc_max_rate;
-#ifdef CONFIG_PM_SLEEP
 static unsigned long emc_override_rate;
-#endif
 unsigned long dram_over_temp_state = TEGRA_DRAM_OVER_TEMP_NONE;
 static struct emc_stats tegra_emc_stats;
 struct emc_table *tegra_emc_table;
@@ -159,21 +115,10 @@ static const char *tegra_emc_src_names[TEGRA_EMC_SRC_COUNT] = {
 };
 static struct supported_sequence supported_seqs[] = {
 	{
-		0x5,
-		emc_set_clock_r21012,
-		NULL,
-		"21012",
-	},
-	{
 		0x6,
 		emc_set_clock_r21015,
 		__do_periodic_emc_compensation_r21015,
 		"21018"
-	},
-	{
-		0x7,
-		emc_set_clock_r21021,
-		__do_periodic_emc_compensation_r21021,
 	},
 	{
 		0,
@@ -183,37 +128,19 @@ static struct supported_sequence supported_seqs[] = {
 	}
 };
 
-static int emc_get_dram_temperature(void);
-
-/* MR4 parameters */
-static u32 prev_temp = 0xffffffff; /* i.e -1. */
-static u32 test_mode;
-static int dram_temp_override;
-static unsigned long mr4_freq_threshold;
-static atomic_t mr4_temp_poll;
-static atomic_t mr4_force_poll;
-static atomic_t mr4_thresh_poll;
-
-static void emc_mr4_poll(unsigned long nothing);
-static struct timer_list emc_timer_mr4 =
-	TIMER_DEFERRED_INITIALIZER(emc_mr4_poll, 0, 0);
-
 static void emc_train(unsigned long nothing);
 static struct timer_list emc_timer_training =
 	TIMER_INITIALIZER(emc_train, 0, 0);
 
-#ifdef CONFIG_DEBUG_FS
 static u8 tegra210_emc_bw_efficiency = 80;
 static u8 tegra210_emc_iso_share = 100;
 static unsigned long last_iso_bw;
-#endif
 
 static u32 bw_calc_freqs[] = {
 	5, 10, 20, 30, 40, 60, 80, 100, 120, 140, 160, 180,
 	200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700
 };
 
-#ifdef CONFIG_DEBUG_FS
 static u32 tegra210_lpddr3_iso_efficiency_os_idle[] = {
 	64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
 	64, 63, 60, 54, 45, 45, 45, 45, 45, 45, 45
@@ -266,7 +193,6 @@ static struct emc_iso_usage tegra210_emc_iso_usage[] = {
 		50, iso_share_calc_tegra210_general
 	},
 };
-#endif
 
 inline void emc_writel(u32 val, unsigned long offset)
 {
@@ -350,106 +276,6 @@ inline void ccfifo_writel(u32 val, unsigned long addr, u32 delay)
 		emc_base + EMC_CCFIFO_ADDR);
 }
 
-static void emc_mr4_poll(unsigned long nothing)
-{
-	int dram_temp;
-
-	if (!test_mode)
-		dram_temp = emc_get_dram_temperature();
-	else
-		dram_temp = dram_temp_override;
-
-	if (prev_temp == dram_temp)
-		goto reset;
-
-	if (WARN(dram_temp < 0, "Unable to read DRAM temp (MR4)!\n"))
-		goto reset;
-
-	switch (dram_temp) {
-	case 0:
-	case 1:
-	case 2:
-	case 3:
-		/*
-		 * Temp is fine - go back to regular refresh.
-		 */
-		pr_info("Setting nominal refresh + timings.\n");
-		tegra210_emc_set_over_temp_state(TEGRA_DRAM_OVER_TEMP_NONE);
-		break;
-	case 4:
-		pr_info("Enabling 2x refresh.\n");
-		tegra210_emc_set_over_temp_state(TEGRA_DRAM_OVER_TEMP_REFRESH_X2);
-		break;
-	case 5:
-		pr_info("Enabling 4x refresh.\n");
-		tegra210_emc_set_over_temp_state(TEGRA_DRAM_OVER_TEMP_REFRESH_X4);
-		break;
-	case 6:
-		pr_info("Enabling 4x refresh + derating.\n");
-		tegra210_emc_set_over_temp_state(TEGRA_DRAM_OVER_TEMP_THROTTLE);
-		break;
-	default:
-		WARN(1, "%s: Invalid DRAM temp state %d\n",
-		     __func__, dram_temp);
-		break;
-	}
-	prev_temp = dram_temp;
-
-reset:
-	if (atomic_read(&mr4_temp_poll) == 0 &&
-	    atomic_read(&mr4_force_poll) == 0 &&
-	    atomic_read(&mr4_thresh_poll) == 0)
-		return;
-
-	if (mod_timer(&emc_timer_mr4,
-		      jiffies + msecs_to_jiffies(timer_period_mr4)))
-		pr_err("Failed to restart timer!!!\n");
-}
-
-/*
- * Tell the dram thermal driver to start/stop polling for the DRAM temperature.
- * This should be called when the DRAM temp might be hot, for example, if some
- * other temp sensor is reading very high.
- */
-static void tegra_emc_mr4_temp_trigger(int do_poll)
-{
-	if (do_poll) {
-		atomic_set(&mr4_temp_poll, 1);
-		mod_timer(&emc_timer_mr4,
-			  jiffies + msecs_to_jiffies(timer_period_mr4));
-	} else {
-		atomic_set(&mr4_temp_poll, 0);
-	}
-}
-
-static void tegra_emc_mr4_thresh_trigger(int do_poll)
-{
-	if (do_poll) {
-		atomic_set(&mr4_thresh_poll, 1);
-		mod_timer(&emc_timer_mr4,
-			  jiffies + msecs_to_jiffies(timer_period_mr4));
-	} else {
-		atomic_set(&mr4_thresh_poll, 0);
-	}
-}
-
-/*
- * If the freq is higher than some threshold then poll. Only happens if a
- * threshold is actually defined.
- */
-static void tegra_emc_mr4_freq_check(unsigned long freq)
-{
-	if (mr4_freq_threshold && freq >= mr4_freq_threshold)
-		tegra_emc_mr4_thresh_trigger(1);
-	else
-		tegra_emc_mr4_thresh_trigger(0);
-}
-
-void tegra210_emc_mr4_set_freq_thresh(unsigned long thresh)
-{
-	mr4_freq_threshold = thresh;
-}
-
 static void emc_train(unsigned long nothing)
 {
 	unsigned long flags;
@@ -475,46 +301,6 @@ static void emc_timer_training_start(void)
 static void emc_timer_training_stop(void)
 {
 	del_timer(&emc_timer_training);
-}
-
-void tegra210_change_dll_src(struct emc_table *next_timing, u32 clksrc)
-{
-	u32 out_enb_x;
-	u32 dll_setting = next_timing->dll_clk_src;
-	u32 emc_clk_src;
-	u32 emc_clk_div;
-
-	out_enb_x = 0;
-	emc_clk_src = (clksrc & EMC_CLK_EMC_2X_CLK_SRC_MASK) >>
-		       EMC_CLK_EMC_2X_CLK_SRC_SHIFT;
-	emc_clk_div = (clksrc & EMC_CLK_EMC_2X_CLK_DIVISOR_MASK) >>
-		       EMC_CLK_EMC_2X_CLK_DIVISOR_SHIFT;
-
-	dll_setting &= ~(DLL_CLK_EMC_DLL_CLK_SRC_MASK |
-			 DLL_CLK_EMC_DLL_CLK_DIVISOR_MASK);
-	dll_setting |= emc_clk_src << DLL_CLK_EMC_DLL_CLK_SRC_SHIFT;
-	dll_setting |= emc_clk_div << DLL_CLK_EMC_DLL_CLK_DIVISOR_SHIFT;
-
-	dll_setting &= ~DLL_CLK_EMC_DLL_DDLL_CLK_SEL_MASK;
-	if (emc_clk_src == EMC_CLK_SOURCE_PLLMB_LJ)
-		dll_setting |= (PLLM_VCOB <<
-				DLL_CLK_EMC_DLL_DDLL_CLK_SEL_SHIFT);
-	else if (emc_clk_src == EMC_CLK_SOURCE_PLLM_LJ)
-		dll_setting |= (PLLM_VCOA <<
-				DLL_CLK_EMC_DLL_DDLL_CLK_SEL_SHIFT);
-	else
-		dll_setting |= (EMC_DLL_SWITCH_OUT <<
-				DLL_CLK_EMC_DLL_DDLL_CLK_SEL_SHIFT);
-
-	writel(dll_setting, clk_base + CLK_RST_CONTROLLER_CLK_SOURCE_EMC_DLL);
-
-	if (next_timing->clk_out_enb_x_0_clk_enb_emc_dll) {
-		writel(CLK_OUT_ENB_X_CLK_ENB_EMC_DLL,
-		       clk_base + CLK_RST_CONTROLLER_CLK_OUT_ENB_X_SET);
-	} else {
-		writel(CLK_OUT_ENB_X_CLK_ENB_EMC_DLL,
-		       clk_base + CLK_RST_CONTROLLER_CLK_OUT_ENB_X_CLR);
-	}
 }
 
 struct emc_table *get_timing_from_freq(unsigned long rate)
@@ -613,709 +399,15 @@ void emc_timing_update(int dual_chan)
 	}
 }
 
-void tegra210_update_emc_alt_timing(struct emc_table *current_timing)
-{
-	struct emc_table *current_table, *alt_timing;
-	int i;
-
-	if (!tegra_emc_table_derated)
-		return;
-
-	current_table = emc_get_table(dram_over_temp_state);
-	i = current_timing - current_table;
-
-	BUG_ON(i < 0 || i > tegra_emc_table_size);
-
-	if (dram_over_temp_state == TEGRA_DRAM_OVER_TEMP_THROTTLE)
-		alt_timing = &tegra_emc_table_normal[i];
-	else
-		alt_timing = &tegra_emc_table_derated[i];
-
-	__emc_copy_table_params(current_timing, alt_timing,
-				EMC_COPY_TABLE_PARAM_PERIODIC_FIELDS);
-}
-
-static void emc_copy_table_params(struct emc_table *src,
-				  struct emc_table *dst,
-				  int table_size,
-				  int flags)
-{
-	int i;
-
-	for (i = 0; i < table_size; i++)
-		__emc_copy_table_params(&src[i], &dst[i], flags);
-}
-
-u32 tegra210_actual_osc_clocks(u32 in)
-{
-	if (in < 0x40)
-		return in * 16;
-	else if (in < 0x80)
-		return 2048;
-	else if (in < 0xc0)
-		return 4096;
-	else
-		return 8192;
-}
-
-void tegra210_start_periodic_compensation(void)
-{
-	u32 mpc_req = 0x4b;
-
-	emc_writel(mpc_req, EMC_MPC);
-	mpc_req = emc_readl(EMC_MPC);
-}
-
-u32 tegra210_apply_periodic_compensation_trimmer(
-		struct emc_table *next_timing, u32 offset)
-{
-	u32 i, temp = 0;
-	u32 next_timing_rate_mhz = next_timing->rate / 1000;
-	s32 tree_delta[4];
-	s32 tree_delta_taps[4];
-	s32 new[] = {
-		TRIM_REG(0, 0, 0, 0),
-		TRIM_REG(0, 0, 0, 1),
-		TRIM_REG(0, 0, 1, 2),
-		TRIM_REG(0, 0, 1, 3),
-
-		TRIM_REG(1, 0, 2, 4),
-		TRIM_REG(1, 0, 2, 5),
-		TRIM_REG(1, 0, 3, 6),
-		TRIM_REG(1, 0, 3, 7),
-
-		TRIM_REG(0, 1, 0, 0),
-		TRIM_REG(0, 1, 0, 1),
-		TRIM_REG(0, 1, 1, 2),
-		TRIM_REG(0, 1, 1, 3),
-
-		TRIM_REG(1, 1, 2, 4),
-		TRIM_REG(1, 1, 2, 5),
-		TRIM_REG(1, 1, 3, 6),
-		TRIM_REG(1, 1, 3, 7)
-	};
-
-	switch (offset) {
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK0_0:
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK0_1:
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK0_2:
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK0_3:
-	case EMC_DATA_BRLSHFT_0:
-		tree_delta[0] = 128 *
-				(next_timing->current_dram_clktree_c0d0u0 -
-				 next_timing->trained_dram_clktree_c0d0u0);
-		tree_delta[1] = 128 *
-				(next_timing->current_dram_clktree_c0d0u1 -
-				 next_timing->trained_dram_clktree_c0d0u1);
-		tree_delta[2] = 128 *
-				(next_timing->current_dram_clktree_c1d0u0 -
-				 next_timing->trained_dram_clktree_c1d0u0);
-		tree_delta[3] = 128 *
-				(next_timing->current_dram_clktree_c1d0u1 -
-				 next_timing->trained_dram_clktree_c1d0u1);
-
-		tree_delta_taps[0] = (tree_delta[0] *
-				     (s32)next_timing_rate_mhz) / 1000000;
-		tree_delta_taps[1] = (tree_delta[1] *
-				     (s32)next_timing_rate_mhz) / 1000000;
-		tree_delta_taps[2] = (tree_delta[2] *
-				     (s32)next_timing_rate_mhz) / 1000000;
-		tree_delta_taps[3] = (tree_delta[3] *
-				     (s32)next_timing_rate_mhz) / 1000000;
-
-		for (i = 0; i < 4; i++) {
-			if ((tree_delta_taps[i] > next_timing->tree_margin) ||
-			    (tree_delta_taps[i] <
-			    (-1 * next_timing->tree_margin))) {
-				new[i * 2] = new[i * 2] + tree_delta_taps[i];
-				new[i * 2 + 1] = new[i * 2 + 1] +
-						 tree_delta_taps[i];
-			}
-		}
-
-		if (offset == EMC_DATA_BRLSHFT_0) {
-			for (i = 0; i < 8; i++)
-				new[i] = new[i] / 64;
-		} else {
-			for (i = 0; i < 8; i++)
-				new[i] = new[i] % 64;
-		}
-		break;
-
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK1_0:
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK1_1:
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK1_2:
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK1_3:
-	case EMC_DATA_BRLSHFT_1:
-		tree_delta[0] = 128 *
-				(next_timing->current_dram_clktree_c0d1u0 -
-				 next_timing->trained_dram_clktree_c0d1u0);
-		tree_delta[1] = 128 *
-				(next_timing->current_dram_clktree_c0d1u1 -
-				 next_timing->trained_dram_clktree_c0d1u1);
-		tree_delta[2] = 128 *
-				(next_timing->current_dram_clktree_c1d1u0 -
-				 next_timing->trained_dram_clktree_c1d1u0);
-		tree_delta[3] = 128 *
-				(next_timing->current_dram_clktree_c1d1u1 -
-				 next_timing->trained_dram_clktree_c1d1u1);
-
-		tree_delta_taps[0] = (tree_delta[0] *
-				     (s32)next_timing_rate_mhz) / 1000000;
-		tree_delta_taps[1] = (tree_delta[1] *
-				     (s32)next_timing_rate_mhz) / 1000000;
-		tree_delta_taps[2] = (tree_delta[2] *
-				     (s32)next_timing_rate_mhz) / 1000000;
-		tree_delta_taps[3] = (tree_delta[3] *
-				     (s32)next_timing_rate_mhz) / 1000000;
-
-		for (i = 0; i < 4; i++) {
-			if ((tree_delta_taps[i] > next_timing->tree_margin) ||
-			    (tree_delta_taps[i] <
-			     (-1 * next_timing->tree_margin))) {
-				new[8 + i * 2] = new[8 + i * 2] +
-						 tree_delta_taps[i];
-				new[8 + i * 2 + 1] = new[8 + i * 2 + 1] +
-						     tree_delta_taps[i];
-			}
-		}
-
-		if (offset == EMC_DATA_BRLSHFT_1) {
-			for (i = 0; i < 8; i++)
-				new[i + 8] = new[i + 8] / 64;
-		} else {
-			for (i = 0; i < 8; i++)
-				new[i + 8] = new[i + 8] % 64;
-		}
-		break;
-	}
-
-	switch (offset) {
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK0_0:
-		temp = CALC_TEMP(0, 0, 0, 1, 0);
-		break;
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK0_1:
-		temp = CALC_TEMP(0, 1, 2, 3, 2);
-		break;
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK0_2:
-		temp = CALC_TEMP(0, 2, 4, 5, 4);
-		break;
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK0_3:
-		temp = CALC_TEMP(0, 3, 6, 7, 6);
-		break;
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK1_0:
-		temp = CALC_TEMP(1, 0, 0, 1, 8);
-		break;
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK1_1:
-		temp = CALC_TEMP(1, 1, 2, 3, 10);
-		break;
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK1_2:
-		temp = CALC_TEMP(1, 2, 4, 5, 12);
-		break;
-	case EMC_PMACRO_OB_DDLL_LONG_DQ_RANK1_3:
-		temp = CALC_TEMP(1, 3, 6, 7, 14);
-		break;
-	case EMC_DATA_BRLSHFT_0:
-		temp = ((new[0] <<
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE0_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE0_DATA_BRLSHFT_MASK) |
-		       ((new[1] <<
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE1_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE1_DATA_BRLSHFT_MASK) |
-		       ((new[2] <<
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE2_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE2_DATA_BRLSHFT_MASK) |
-		       ((new[3] <<
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE3_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE3_DATA_BRLSHFT_MASK) |
-		       ((new[4] <<
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE4_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE4_DATA_BRLSHFT_MASK) |
-		       ((new[5] <<
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE5_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE5_DATA_BRLSHFT_MASK) |
-		       ((new[6] <<
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE6_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE6_DATA_BRLSHFT_MASK) |
-		       ((new[7] <<
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE7_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_0_RANK0_BYTE7_DATA_BRLSHFT_MASK);
-		break;
-	case EMC_DATA_BRLSHFT_1:
-		temp = ((new[8] <<
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE0_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE0_DATA_BRLSHFT_MASK) |
-		       ((new[9] <<
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE1_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE1_DATA_BRLSHFT_MASK) |
-		       ((new[10] <<
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE2_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE2_DATA_BRLSHFT_MASK) |
-		       ((new[11] <<
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE3_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE3_DATA_BRLSHFT_MASK) |
-		       ((new[12] <<
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE4_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE4_DATA_BRLSHFT_MASK) |
-		       ((new[13] <<
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE5_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE5_DATA_BRLSHFT_MASK) |
-		       ((new[14] <<
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE6_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE6_DATA_BRLSHFT_MASK) |
-		       ((new[15] <<
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE7_DATA_BRLSHFT_SHIFT) &
-			 EMC_DATA_BRLSHFT_1_RANK1_BYTE7_DATA_BRLSHFT_MASK);
-		break;
-	default:
-		break;
-	}
-
-	return temp;
-}
-
-u32 tegra210_dll_prelock(struct emc_table *next_timing,
-			 int dvfs_with_training, u32 clksrc)
-{
-	u32 emc_dig_dll_status;
-	u32 dll_locked;
-	u32 dll_out;
-	u32 emc_cfg_dig_dll;
-	u32 emc_dll_cfg_0;
-	u32 emc_dll_cfg_1;
-	u32 ddllcal_ctrl_start_trim_val;
-	u32 dll_en;
-	u32 dual_channel_lpddr4_case;
-	u32 dll_priv_updated;
-
-	dual_channel_lpddr4_case =
-		      !!(emc_readl(EMC_FBIO_CFG7) & EMC_FBIO_CFG7_CH1_ENABLE) &
-		      !!(emc_readl(EMC_FBIO_CFG7) & EMC_FBIO_CFG7_CH0_ENABLE);
-
-	emc_dig_dll_status = 0;
-	dll_locked = 0;
-	dll_out = 0;
-	emc_cfg_dig_dll = 0;
-	emc_dll_cfg_0 = 0;
-	emc_dll_cfg_1 = 0;
-	ddllcal_ctrl_start_trim_val = 0;
-	dll_en = 0;
-
-	emc_cfg_dig_dll = emc_readl(EMC_CFG_DIG_DLL) &
-			  ~EMC_CFG_DIG_DLL_CFG_DLL_LOCK_LIMIT_MASK;
-	emc_cfg_dig_dll |= (3 << EMC_CFG_DIG_DLL_CFG_DLL_LOCK_LIMIT_SHIFT);
-	emc_cfg_dig_dll &= ~EMC_CFG_DIG_DLL_CFG_DLL_EN;
-	emc_cfg_dig_dll &= ~EMC_CFG_DIG_DLL_CFG_DLL_MODE_MASK;
-	emc_cfg_dig_dll |= (3 << EMC_CFG_DIG_DLL_CFG_DLL_MODE_SHIFT);
-	emc_cfg_dig_dll |= EMC_CFG_DIG_DLL_CFG_DLL_STALL_ALL_TRAFFIC;
-	emc_cfg_dig_dll &= ~EMC_CFG_DIG_DLL_CFG_DLL_STALL_RW_UNTIL_LOCK;
-	emc_cfg_dig_dll &= ~EMC_CFG_DIG_DLL_CFG_DLL_STALL_ALL_UNTIL_LOCK;
-
-	emc_writel(emc_cfg_dig_dll, EMC_CFG_DIG_DLL);
-	emc_writel(1, EMC_TIMING_CONTROL);
-
-	wait_for_update(EMC_EMC_STATUS,
-			EMC_EMC_STATUS_TIMING_UPDATE_STALLED, 0, REG_EMC);
-	if (dual_channel_lpddr4_case)
-		wait_for_update(EMC_EMC_STATUS,
-				EMC_EMC_STATUS_TIMING_UPDATE_STALLED,
-				0, REG_EMC1);
-
-	do {
-		emc_cfg_dig_dll = emc_readl(EMC_CFG_DIG_DLL);
-		dll_en = emc_cfg_dig_dll & EMC_CFG_DIG_DLL_CFG_DLL_EN;
-	} while (dll_en == 1);
-
-	if (dual_channel_lpddr4_case) {
-		do {
-			emc_cfg_dig_dll = emc1_readl(EMC_CFG_DIG_DLL);
-			dll_en = emc_cfg_dig_dll & EMC_CFG_DIG_DLL_CFG_DLL_EN;
-		} while (dll_en == 1);
-	}
-
-	emc_dll_cfg_0 = next_timing->burst_regs[EMC_DLL_CFG_0_INDEX];
-
-	emc_writel(emc_dll_cfg_0, EMC_DLL_CFG_0);
-
-	if (next_timing->rate >= 400000 && next_timing->rate < 600000)
-		ddllcal_ctrl_start_trim_val = 150;
-	else if (next_timing->rate >= 600000 && next_timing->rate < 800000)
-		ddllcal_ctrl_start_trim_val = 100;
-	else if (next_timing->rate >= 800000 && next_timing->rate < 1000000)
-		ddllcal_ctrl_start_trim_val = 70;
-	else if (next_timing->rate >= 1000000 && next_timing->rate < 1200000)
-		ddllcal_ctrl_start_trim_val = 30;
-	else
-		ddllcal_ctrl_start_trim_val = 20;
-
-	emc_dll_cfg_1 = emc_readl(EMC_DLL_CFG_1);
-	emc_dll_cfg_1 &= EMC_DLL_CFG_1_DDLLCAL_CTRL_START_TRIM_MASK;
-	emc_dll_cfg_1 |= ddllcal_ctrl_start_trim_val;
-	emc_writel(emc_dll_cfg_1, EMC_DLL_CFG_1);
-
-	tegra210_change_dll_src(next_timing, clksrc);
-
-	emc_cfg_dig_dll = emc_readl(EMC_CFG_DIG_DLL);
-	emc_cfg_dig_dll |= EMC_CFG_DIG_DLL_CFG_DLL_EN;
-	emc_writel(emc_cfg_dig_dll, EMC_CFG_DIG_DLL);
-
-	emc_timing_update(dual_channel_lpddr4_case ?
-			  DUAL_CHANNEL : SINGLE_CHANNEL);
-
-	do {
-		emc_cfg_dig_dll = emc_readl(EMC_CFG_DIG_DLL);
-		dll_en = emc_cfg_dig_dll & EMC_CFG_DIG_DLL_CFG_DLL_EN;
-	} while (dll_en == 0);
-
-	if (dual_channel_lpddr4_case) {
-		do {
-			emc_cfg_dig_dll = emc1_readl(EMC_CFG_DIG_DLL);
-			dll_en = emc_cfg_dig_dll & EMC_CFG_DIG_DLL_CFG_DLL_EN;
-		} while (dll_en == 0);
-	}
-
-	do {
-		emc_dig_dll_status = emc_readl(EMC_DIG_DLL_STATUS);
-		dll_locked = emc_dig_dll_status & EMC_DIG_DLL_STATUS_DLL_LOCK;
-		dll_priv_updated = emc_dig_dll_status &
-				   EMC_DIG_DLL_STATUS_DLL_PRIV_UPDATED;
-	} while (!dll_locked || !dll_priv_updated);
-
-	emc_dig_dll_status = emc_readl(EMC_DIG_DLL_STATUS);
-	return emc_dig_dll_status & EMC_DIG_DLL_STATUS_DLL_OUT_MASK;
-}
-
-u32 tegra210_dvfs_power_ramp_up(u32 clk, int flip_backward,
-				struct emc_table *last_timing,
-				struct emc_table *next_timing)
-{
-	u32 pmacro_cmd_pad;
-	u32 pmacro_dq_pad;
-	u32 pmacro_rfu1;
-	u32 pmacro_cfg5;
-	u32 pmacro_common_tx;
-	u32 ramp_up_wait = 0;
-
-	if (flip_backward) {
-		pmacro_cmd_pad   = last_timing->
-			burst_regs[EMC_PMACRO_CMD_PAD_TX_CTRL_INDEX];
-		pmacro_dq_pad    = last_timing->
-			burst_regs[EMC_PMACRO_DATA_PAD_TX_CTRL_INDEX];
-		pmacro_rfu1      = last_timing->
-			burst_regs[EMC_PMACRO_BRICK_CTRL_RFU1_INDEX];
-		pmacro_cfg5      = last_timing->burst_regs[EMC_FBIO_CFG5_INDEX];
-		pmacro_common_tx = last_timing->
-			burst_regs[EMC_PMACRO_COMMON_PAD_TX_CTRL_INDEX];
-	} else {
-		pmacro_cmd_pad   = next_timing->
-			burst_regs[EMC_PMACRO_CMD_PAD_TX_CTRL_INDEX];
-		pmacro_dq_pad    = next_timing->
-			burst_regs[EMC_PMACRO_DATA_PAD_TX_CTRL_INDEX];
-		pmacro_rfu1      = next_timing->
-			burst_regs[EMC_PMACRO_BRICK_CTRL_RFU1_INDEX];
-		pmacro_cfg5      = next_timing->burst_regs[EMC_FBIO_CFG5_INDEX];
-		pmacro_common_tx = next_timing->
-			burst_regs[EMC_PMACRO_COMMON_PAD_TX_CTRL_INDEX];
-	}
-	pmacro_cmd_pad |= EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQ_TX_DRVFORCEON;
-
-	if (clk < 1000000 / DVFS_FGCG_MID_SPEED_THRESHOLD) {
-		ccfifo_writel(pmacro_common_tx & 0xa,
-			      EMC_PMACRO_COMMON_PAD_TX_CTRL, 0);
-		ccfifo_writel(pmacro_common_tx & 0xf,
-			      EMC_PMACRO_COMMON_PAD_TX_CTRL,
-			      (100000 / clk) + 1);
-		ramp_up_wait += 100000;
-	} else {
-		ccfifo_writel(pmacro_common_tx | 0x8,
-			      EMC_PMACRO_COMMON_PAD_TX_CTRL, 0);
-	}
-
-	if (clk < 1000000 / DVFS_FGCG_HIGH_SPEED_THRESHOLD) {
-		if (clk < 1000000 / IOBRICK_DCC_THRESHOLD) {
-			pmacro_cmd_pad |=
-				EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQSP_TX_E_DCC |
-				EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQSN_TX_E_DCC;
-			pmacro_cmd_pad &=
-				~(EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQ_TX_E_DCC |
-				  EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_CMD_TX_E_DCC);
-			ccfifo_writel(pmacro_cmd_pad,
-				      EMC_PMACRO_CMD_PAD_TX_CTRL,
-				      (100000 / clk) + 1);
-			ramp_up_wait += 100000;
-
-			pmacro_dq_pad |=
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQSP_TX_E_DCC |
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQSN_TX_E_DCC;
-			pmacro_dq_pad &=
-			       ~(EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQ_TX_E_DCC |
-				 EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_CMD_TX_E_DCC);
-			ccfifo_writel(pmacro_dq_pad,
-				      EMC_PMACRO_DATA_PAD_TX_CTRL, 0);
-			ccfifo_writel(pmacro_rfu1 & 0xfe40fe40,
-				      EMC_PMACRO_BRICK_CTRL_RFU1, 0);
-		} else {
-			ccfifo_writel(pmacro_rfu1 & 0xfe40fe40,
-				      EMC_PMACRO_BRICK_CTRL_RFU1,
-				      (100000 / clk) + 1);
-			ramp_up_wait += 100000;
-		}
-
-		ccfifo_writel(pmacro_rfu1 & 0xfeedfeed,
-			      EMC_PMACRO_BRICK_CTRL_RFU1, (100000 / clk) + 1);
-		ramp_up_wait += 100000;
-
-		if (clk < 1000000 / IOBRICK_DCC_THRESHOLD) {
-			pmacro_cmd_pad |=
-				EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQSP_TX_E_DCC |
-				EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQSN_TX_E_DCC |
-				EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQ_TX_E_DCC |
-				EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_CMD_TX_E_DCC;
-			ccfifo_writel(pmacro_cmd_pad,
-				      EMC_PMACRO_CMD_PAD_TX_CTRL,
-				      (100000 / clk) + 1);
-			ramp_up_wait += 100000;
-
-			pmacro_dq_pad |=
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQSP_TX_E_DCC |
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQSN_TX_E_DCC |
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQ_TX_E_DCC |
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_CMD_TX_E_DCC;
-			ccfifo_writel(pmacro_dq_pad,
-				      EMC_PMACRO_DATA_PAD_TX_CTRL, 0);
-			ccfifo_writel(pmacro_rfu1,
-				      EMC_PMACRO_BRICK_CTRL_RFU1, 0);
-		} else {
-			ccfifo_writel(pmacro_rfu1,
-				      EMC_PMACRO_BRICK_CTRL_RFU1,
-				      (100000 / clk) + 1);
-			ramp_up_wait += 100000;
-		}
-
-		ccfifo_writel(pmacro_cfg5 & ~EMC_FBIO_CFG5_CMD_TX_DIS,
-			      EMC_FBIO_CFG5, (100000 / clk) + 10);
-		ramp_up_wait += 100000 + (10 * clk);
-	} else if (clk < 1000000 / DVFS_FGCG_MID_SPEED_THRESHOLD) {
-		ccfifo_writel(pmacro_rfu1 | 0x06000600,
-			      EMC_PMACRO_BRICK_CTRL_RFU1, (100000 / clk) + 1);
-		ccfifo_writel(pmacro_cfg5 & ~EMC_FBIO_CFG5_CMD_TX_DIS,
-			      EMC_FBIO_CFG5, (100000 / clk) + 10);
-		ramp_up_wait += 100000 + 10 * clk;
-	} else {
-		ccfifo_writel(pmacro_rfu1 | 0x00000600,
-			      EMC_PMACRO_BRICK_CTRL_RFU1, 0);
-		ccfifo_writel(pmacro_cfg5 & ~EMC_FBIO_CFG5_CMD_TX_DIS,
-			      EMC_FBIO_CFG5, 12);
-		ramp_up_wait += 12 * clk;
-	}
-
-	pmacro_cmd_pad &= ~EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQ_TX_DRVFORCEON;
-	ccfifo_writel(pmacro_cmd_pad, EMC_PMACRO_CMD_PAD_TX_CTRL, 5);
-
-	return ramp_up_wait;
-}
-
-u32 tegra210_dvfs_power_ramp_down(u32 clk, int flip_backward,
-				  struct emc_table *last_timing,
-				  struct emc_table *next_timing)
-{
-	u32 ramp_down_wait = 0;
-	u32 pmacro_cmd_pad;
-	u32 pmacro_dq_pad;
-	u32 pmacro_rfu1;
-	u32 pmacro_cfg5;
-	u32 pmacro_common_tx;
-	u32 seq_wait;
-
-	if (flip_backward) {
-		pmacro_cmd_pad   = next_timing->
-			burst_regs[EMC_PMACRO_CMD_PAD_TX_CTRL_INDEX];
-		pmacro_dq_pad    = next_timing->
-			burst_regs[EMC_PMACRO_DATA_PAD_TX_CTRL_INDEX];
-		pmacro_rfu1      = next_timing->
-			burst_regs[EMC_PMACRO_BRICK_CTRL_RFU1_INDEX];
-		pmacro_cfg5      = next_timing->
-			burst_regs[EMC_FBIO_CFG5_INDEX];
-		pmacro_common_tx = next_timing->
-			burst_regs[EMC_PMACRO_COMMON_PAD_TX_CTRL_INDEX];
-	} else {
-		pmacro_cmd_pad   = last_timing->
-			burst_regs[EMC_PMACRO_CMD_PAD_TX_CTRL_INDEX];
-		pmacro_dq_pad    = last_timing->
-			burst_regs[EMC_PMACRO_DATA_PAD_TX_CTRL_INDEX];
-		pmacro_rfu1      = last_timing->
-			burst_regs[EMC_PMACRO_BRICK_CTRL_RFU1_INDEX];
-		pmacro_cfg5      = last_timing->
-			burst_regs[EMC_FBIO_CFG5_INDEX];
-		pmacro_common_tx = last_timing->
-			burst_regs[EMC_PMACRO_COMMON_PAD_TX_CTRL_INDEX];
-	}
-
-	pmacro_cmd_pad |= EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQ_TX_DRVFORCEON;
-
-	ccfifo_writel(pmacro_cmd_pad, EMC_PMACRO_CMD_PAD_TX_CTRL, 0);
-	ccfifo_writel(pmacro_cfg5 | EMC_FBIO_CFG5_CMD_TX_DIS, EMC_FBIO_CFG5,
-		      12);
-	ramp_down_wait = 12 * clk;
-
-	seq_wait = (100000 / clk) + 1;
-
-	if (clk < (1000000 / DVFS_FGCG_HIGH_SPEED_THRESHOLD)) {
-		if (clk < (1000000 / IOBRICK_DCC_THRESHOLD)) {
-			pmacro_cmd_pad &=
-				~(EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQ_TX_E_DCC |
-				  EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_CMD_TX_E_DCC);
-			pmacro_cmd_pad |=
-				EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQSP_TX_E_DCC |
-				EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQSN_TX_E_DCC;
-			ccfifo_writel(pmacro_cmd_pad,
-				      EMC_PMACRO_CMD_PAD_TX_CTRL, seq_wait);
-			ramp_down_wait += 100000;
-
-			pmacro_dq_pad &=
-			      ~(EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQ_TX_E_DCC |
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_CMD_TX_E_DCC);
-			pmacro_dq_pad |=
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQSP_TX_E_DCC |
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQSN_TX_E_DCC;
-			ccfifo_writel(pmacro_dq_pad,
-				      EMC_PMACRO_DATA_PAD_TX_CTRL, 0);
-			ccfifo_writel(pmacro_rfu1 & ~0x01120112,
-				      EMC_PMACRO_BRICK_CTRL_RFU1, 0);
-		} else {
-			ccfifo_writel(pmacro_rfu1 & ~0x01120112,
-				      EMC_PMACRO_BRICK_CTRL_RFU1, seq_wait);
-			ramp_down_wait += 100000;
-		}
-
-		ccfifo_writel(pmacro_rfu1 & ~0x01bf01bf,
-			      EMC_PMACRO_BRICK_CTRL_RFU1, seq_wait);
-		ramp_down_wait += 100000;
-
-		if (clk < (1000000 / IOBRICK_DCC_THRESHOLD)) {
-			pmacro_cmd_pad &=
-				~(EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQ_TX_E_DCC |
-				  EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_CMD_TX_E_DCC |
-				  EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQSP_TX_E_DCC |
-				  EMC_PMACRO_CMD_PAD_TX_CTRL_CMD_DQSN_TX_E_DCC);
-			ccfifo_writel(pmacro_cmd_pad,
-				      EMC_PMACRO_CMD_PAD_TX_CTRL, seq_wait);
-			ramp_down_wait += 100000;
-
-			pmacro_dq_pad &=
-			      ~(EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQ_TX_E_DCC |
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_CMD_TX_E_DCC |
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQSP_TX_E_DCC |
-				EMC_PMACRO_DATA_PAD_TX_CTRL_DATA_DQSN_TX_E_DCC);
-			ccfifo_writel(pmacro_dq_pad,
-				      EMC_PMACRO_DATA_PAD_TX_CTRL, 0);
-			ccfifo_writel(pmacro_rfu1 & ~0x07ff07ff,
-				      EMC_PMACRO_BRICK_CTRL_RFU1, 0);
-		} else {
-			ccfifo_writel(pmacro_rfu1 & ~0x07ff07ff,
-				      EMC_PMACRO_BRICK_CTRL_RFU1, seq_wait);
-			ramp_down_wait += 100000;
-		}
-	} else {
-		ccfifo_writel(pmacro_rfu1 & ~0xffff07ff,
-			      EMC_PMACRO_BRICK_CTRL_RFU1, seq_wait + 19);
-		ramp_down_wait += 100000 + (20 * clk);
-	}
-
-	if (clk < (1000000 / DVFS_FGCG_MID_SPEED_THRESHOLD)) {
-		ramp_down_wait += 100000;
-		ccfifo_writel(pmacro_common_tx & ~0x5,
-			      EMC_PMACRO_COMMON_PAD_TX_CTRL, seq_wait);
-		ramp_down_wait += 100000;
-		ccfifo_writel(pmacro_common_tx & ~0xf,
-			      EMC_PMACRO_COMMON_PAD_TX_CTRL, seq_wait);
-		ramp_down_wait += 100000;
-		ccfifo_writel(0, 0, seq_wait);
-		ramp_down_wait += 100000;
-	} else {
-		ccfifo_writel(pmacro_common_tx & ~0xf,
-			      EMC_PMACRO_COMMON_PAD_TX_CTRL, seq_wait);
-	}
-
-	return ramp_down_wait;
-}
-
-void tegra210_reset_dram_clktree_values(struct emc_table *table)
-{
-	#define __RESET_CLKTREE(TBL, C, D, U)				\
-	TBL->current_dram_clktree_c ## C ## d ## D ## u ## U =		\
-	TBL->trained_dram_clktree_c ## C ## d ## D ## u ## U
-
-	__RESET_CLKTREE(table, 0, 0, 0);
-	__RESET_CLKTREE(table, 0, 0, 1);
-	__RESET_CLKTREE(table, 1, 0, 0);
-	__RESET_CLKTREE(table, 1, 0, 1);
-	__RESET_CLKTREE(table, 1, 1, 0);
-	__RESET_CLKTREE(table, 1, 1, 1);
-}
-
-static void update_dll_control(u32 emc_cfg_dig_dll,
-		int channel_mode, bool updated_state)
-{
-	emc_writel(emc_cfg_dig_dll, EMC_CFG_DIG_DLL);
-	emc_timing_update(channel_mode);
-
-	wait_for_update(EMC_CFG_DIG_DLL, EMC_CFG_DIG_DLL_CFG_DLL_EN,
-			updated_state, REG_EMC);
-	if (channel_mode == DUAL_CHANNEL)
-		wait_for_update(EMC_CFG_DIG_DLL,
-				EMC_CFG_DIG_DLL_CFG_DLL_EN,
-				updated_state, REG_EMC1);
-}
-
-void tegra210_dll_disable(int channel_mode)
-{
-	u32 emc_cfg_dig_dll;
-
-	emc_cfg_dig_dll = emc_readl(EMC_CFG_DIG_DLL);
-	emc_cfg_dig_dll &= ~EMC_CFG_DIG_DLL_CFG_DLL_EN;
-
-	update_dll_control(emc_cfg_dig_dll, channel_mode, false);
-}
-
-void tegra210_dll_enable(int channel_mode)
-{
-	u32 emc_cfg_dig_dll;
-
-	emc_cfg_dig_dll = emc_readl(EMC_CFG_DIG_DLL);
-	emc_cfg_dig_dll |= EMC_CFG_DIG_DLL_CFG_DLL_EN;
-
-	update_dll_control(emc_cfg_dig_dll, channel_mode, true);
-}
-
 void tegra210_emc_timing_invalidate(void)
 {
 	emc_timing = NULL;
 }
 EXPORT_SYMBOL(tegra210_emc_timing_invalidate);
 
-static enum {
-	BPMP_EMC_UNKNOWN,
-	BPMP_EMC_VALID,
-	BPMP_EMC_INVALID,
-} bpmp_emc_table_state = BPMP_EMC_UNKNOWN;
-static struct mrq_emc_dvfs_table_response bpmp_emc_table;
-
-static void tegra210_bpmp_emc_table_get(void)
-{
-	if (!tegra_bpmp_send_receive(MRQ_EMC_DVFS_TABLE, NULL, 0,
-				     &bpmp_emc_table,
-				     sizeof(bpmp_emc_table)))
-		bpmp_emc_table_state = BPMP_EMC_VALID;
-	else
-		bpmp_emc_table_state = BPMP_EMC_INVALID;
-}
-
 bool tegra210_emc_is_ready(void)
 {
-	if (bpmp_emc_table_state == BPMP_EMC_UNKNOWN)
-		tegra210_bpmp_emc_table_get();
-	return tegra_emc_init_done || bpmp_emc_table_state == BPMP_EMC_VALID;
+	return tegra_emc_init_done;
 }
 EXPORT_SYMBOL(tegra210_emc_is_ready);
 
@@ -1323,18 +415,6 @@ unsigned long tegra210_predict_emc_rate(int millivolts)
 {
 	int i;
 	unsigned long ret = 0;
-
-	if (bpmp_emc_table_state == BPMP_EMC_UNKNOWN)
-		tegra210_bpmp_emc_table_get();
-
-	if (bpmp_emc_table_state == BPMP_EMC_VALID) {
-		for (i = 0; i < bpmp_emc_table.num_pairs; ++i) {
-			if (bpmp_emc_table.pairs[i].mv > millivolts)
-				break;
-			ret = bpmp_emc_table.pairs[i].freq * 1000;
-		}
-		return ret;
-	}
 
 	if (!emc_enable)
 		return -ENODEV;
@@ -1390,9 +470,6 @@ static long tegra210_emc_round_rate(unsigned long rate)
 	if (!tegra_emc_init_done || !tegra_emc_table_size)
 		return 0;
 
-	if (emc_force_max_rate)
-		return tegra_emc_table[tegra_emc_table_size - 1].rate * 1000;
-
 	rate /= 1000;
 	i = get_start_idx(rate);
 	for (; i < tegra_emc_table_size; i++) {
@@ -1415,9 +492,6 @@ unsigned int tegra210_emc_get_clk_latency(unsigned long rate)
 
 	if (!emc_enable || !tegra_emc_init_done || !tegra_emc_table_size)
 		return TEGRA_EMC_DEFAULT_CLK_LATENCY_US;
-
-	if (emc_force_max_rate)
-		rate = tegra_emc_table[tegra_emc_table_size - 1].rate * 1000;
 
 	rate /= 1000;
 	for (i = 0; i < tegra_emc_table_size; i++) {
@@ -1479,8 +553,6 @@ static void emc_set_clock(struct emc_table *next_timing,
 		emc_timer_training_start();
 	else
 		emc_timer_training_stop();
-	/* EMC freq dependent MR4 polling. */
-	tegra_emc_mr4_freq_check(next_timing->rate);
 }
 
 static void emc_last_stats_update(int last_sel)
@@ -1566,9 +638,6 @@ static int tegra210_emc_set_rate(unsigned long rate)
 	if (!tegra_emc_init_done || !tegra_emc_table_size)
 		return -EINVAL;
 
-	if (emc_force_max_rate)
-		rate = tegra_emc_table[tegra_emc_table_size - 1].rate * 1000;
-
 	if (rate == tegra210_emc_get_rate())
 		return 0;
 
@@ -1625,7 +694,6 @@ static inline int bw_calc_get_freq_idx(unsigned long bw)
 	return idx;
 }
 
-#ifdef CONFIG_DEBUG_FS
 static u8 iso_share_calc_tegra210_os_idle(unsigned long iso_bw)
 {
 	int freq_idx = bw_calc_get_freq_idx(iso_bw);
@@ -1665,13 +733,66 @@ static u8 iso_share_calc_tegra210_general(unsigned long iso_bw)
 
 	return ret;
 }
-#endif
+
+static u8 tegra210_emc_get_iso_share(u32 usage_flags, unsigned long iso_bw)
+{
+	int i;
+	u8 iso_share = 100;
+
+	if (usage_flags) {
+		for (i = 0; i < ARRAY_SIZE(tegra210_emc_iso_usage); i++) {
+			u8 share;
+			u32 flags = tegra210_emc_iso_usage[i].emc_usage_flags;
+
+			if (!flags)
+				continue;
+
+			share = tegra210_emc_iso_usage[i].iso_share_calculator(
+						iso_bw);
+			if (!share) {
+				WARN(1, "%s: entry %d: iso_share 0\n",
+				     __func__, i);
+				continue;
+			}
+
+			if ((flags & usage_flags) == flags)
+				iso_share = min(iso_share, share);
+		}
+	}
+	last_iso_bw = iso_bw;
+	tegra210_emc_iso_share = iso_share;
+	return iso_share;
+}
+
+unsigned long tegra210_emc_apply_efficiency(unsigned long total_bw,
+	unsigned long iso_bw, unsigned long max_rate, u32 usage_flags,
+	unsigned long *iso_bw_min)
+{
+	u8 efficiency = tegra210_emc_get_iso_share(usage_flags, iso_bw);
+
+	if (iso_bw && efficiency && (efficiency < 100)) {
+		iso_bw /= efficiency;
+		iso_bw = (iso_bw < max_rate / 100) ?
+				(iso_bw * 100) : max_rate;
+	}
+	if (iso_bw_min)
+		*iso_bw_min = iso_bw;
+
+	efficiency = tegra210_emc_bw_efficiency;
+	if (total_bw && efficiency && (efficiency < 100)) {
+		total_bw = total_bw / efficiency;
+		total_bw = (total_bw < max_rate / 100) ?
+				(total_bw * 100) : max_rate;
+	}
+	return max(total_bw, iso_bw);
+}
 
 static const struct emc_clk_ops tegra210_emc_clk_ops = {
 	.emc_get_rate = tegra210_emc_get_rate,
 	.emc_set_rate = tegra210_emc_set_rate,
 	.emc_round_rate = tegra210_emc_round_rate,
 	.emc_predict_parent = tegra210_emc_predict_parent,
+	.emc_apply_efficiency = tegra210_emc_apply_efficiency,
 };
 
 const struct emc_clk_ops *tegra210_emc_get_ops(void)
@@ -1754,40 +875,17 @@ static int emc_read_mrr(int dev, int addr)
 	return val;
 }
 
-static int emc_get_dram_temperature(void)
-{
-	int mr4,mr4_0, mr4_1;
-	unsigned long flags;
-
-	mr4 = mr4_0 = mr4_1 = 0;
-
-	spin_lock_irqsave(&emc_access_lock, flags);
-	mr4_0 = emc_read_mrr(0, 4);
-	if (tegra_dram_dev_num == 2)
-		mr4_1 = emc_read_mrr(1, 4);
-	spin_unlock_irqrestore(&emc_access_lock, flags);
-
-	if (mr4_0 < 0)
-		return mr4_0;
-
-	if (mr4_1 < 0)
-		return mr4_1;
-
-	mr4_0 = (mr4_0 & LPDDR2_MR4_TEMP_MASK) >> LPDDR2_MR4_TEMP_SHIFT;
-	mr4_1 = (mr4_1 & LPDDR2_MR4_TEMP_MASK) >> LPDDR2_MR4_TEMP_SHIFT;
-
-	/* Consider higher temperature of the two DDR Dies */
-	mr4 = (mr4_0 > mr4_1) ? mr4_0 : mr4_1;
-
-	return mr4;
-}
-
 static int emc_get_dram_temp(void *dev, int *temp)
 {
-	int mr4 = emc_get_dram_temperature();
+	int mr4 = 0;
+	unsigned long flags;
 
-	if (mr4 >= 0)
-		*temp = mr4;
+	spin_lock_irqsave(&emc_access_lock, flags);
+	mr4 = emc_read_mrr(0, 4);
+	spin_unlock_irqrestore(&emc_access_lock, flags);
+
+	if (mr4 < 0)
+		*temp = (mr4 & LPDDR2_MR4_TEMP_MASK) >> LPDDR2_MR4_TEMP_SHIFT;
 
 	return 0;
 }
@@ -1858,7 +956,7 @@ static int emc_stats_show(struct seq_file *s, void *data)
 			continue;
 
 		seq_printf(s, "%-10u %-10llu\n",
-			   tegra_emc_table[i].rate,
+			   tegra_emc_table[i].rate * 1000,
 			   cputime64_to_clock_t(
 					    tegra_emc_stats.time_at_clock[i]));
 	}
@@ -1962,33 +1060,6 @@ static const struct file_operations emc_usage_table_fops = {
 	.release	= single_release,
 };
 
-static int emc_dvfs_table_show(struct seq_file *s, void *data)
-{
-	int i;
-
-	seq_puts(s, "Table Version Info (Table version, rev, rate):\n");
-	for (i = 0; i < tegra_emc_table_size; i++) {
-		seq_printf(s, "%s\n%d\n%d\n",
-				tegra_emc_table_normal[i].dvfs_ver,
-				tegra_emc_table_normal[i].rev,
-				tegra_emc_table_normal[i].rate);
-	}
-
-	return 0;
-}
-
-static int emc_dvfs_table_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, emc_dvfs_table_show, inode->i_private);
-}
-
-static const struct file_operations emc_dvfs_table_fops = {
-	.open		= emc_dvfs_table_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-
 static int dram_temp_get(void *data, u64 *val)
 {
 	int temp = 0;
@@ -2012,31 +1083,9 @@ static int over_temp_state_set(void *data, u64 val)
 DEFINE_SIMPLE_ATTRIBUTE(over_temp_state_fops, over_temp_state_get,
 			over_temp_state_set, "%llu\n");
 
-static int get_mr4_force_poll(void *data, u64 *val)
-{
-	*val = atomic_read(&mr4_force_poll);
-
-	return 0;
-}
-static int set_mr4_force_poll(void *data, u64 val)
-{
-	atomic_set(&mr4_force_poll, (unsigned int)val);
-
-	/* Explicitly wake up the DRAM monitoring thread. */
-	if (atomic_read(&mr4_force_poll))
-		mod_timer(&emc_timer_mr4,
-			  jiffies + msecs_to_jiffies(timer_period_mr4));
-
-	return 0;
-}
-DEFINE_SIMPLE_ATTRIBUTE(mr4_force_poll_fops,
-			get_mr4_force_poll,
-			set_mr4_force_poll, "%llu\n");
-
 static int tegra_emc_debug_init(void)
 {
 	struct dentry *emc_debugfs_root;
-	struct dentry *dram_therm_debugfs;
 
 	if (!tegra_emc_init_done)
 		return -ENODEV;
@@ -2044,11 +1093,6 @@ static int tegra_emc_debug_init(void)
 	emc_debugfs_root = debugfs_create_dir("tegra_emc", NULL);
 	if (!emc_debugfs_root)
 		return -ENOMEM;
-
-	dram_therm_debugfs = debugfs_create_dir("dram_therm",
-						emc_debugfs_root);
-	if (!dram_therm_debugfs)
-		goto err_out;
 
 	if (!debugfs_create_file("stats", S_IRUGO, emc_debugfs_root, NULL,
 				 &emc_stats_fops))
@@ -2082,31 +1126,12 @@ static int tegra_emc_debug_init(void)
 			goto err_out;
 	}
 
-	/* DRAM thermals. */
-	if (!debugfs_create_u32("timer_period", S_IRUGO | S_IWUSR,
-				dram_therm_debugfs, &timer_period_mr4))
-		goto err_out;
-	if (!debugfs_create_u32("test_mode", S_IRUGO | S_IWUSR,
-				dram_therm_debugfs, &test_mode))
-		goto err_out;
-	if (!debugfs_create_u32("dram_temp_override", S_IRUGO | S_IWUSR,
-				dram_therm_debugfs, &dram_temp_override))
-		goto err_out;
-	if (!debugfs_create_file("force_poll", S_IRUGO | S_IWUSR,
-				 dram_therm_debugfs, NULL,
-				 &mr4_force_poll_fops))
-		goto err_out;
-
 	if (tegra_dram_type == DRAM_TYPE_LPDDR4) {
 		if (!debugfs_create_u32("training_timer_period",
 					S_IRUGO | S_IWUSR, emc_debugfs_root,
 					&timer_period_training))
 			goto err_out;
 	}
-
-	if (!debugfs_create_file("tables_info", S_IRUGO, emc_debugfs_root,
-				 NULL, &emc_dvfs_table_fops))
-		goto err_out;
 
 	return 0;
 
@@ -2125,6 +1150,11 @@ static const struct of_device_id mc_match[] = {
 
 static const struct of_device_id car_match[] = {
 	{ .compatible = "nvidia,tegra210-car" },
+	{},
+};
+
+static const struct of_device_id emc_table_match[] = {
+	{ .compatible = "nvidia,tegra210-emc-table" },
 	{},
 };
 
@@ -2180,6 +1210,15 @@ void __emc_copy_table_params(struct emc_table *src, struct emc_table *dst,
 
 		dst->trained = src->trained;
 	}
+}
+
+static void emc_copy_table_params(struct emc_table *src, struct emc_table *dst,
+					int table_size, int flags)
+{
+	int i;
+
+	for (i = 0; i < table_size; i++)
+		__emc_copy_table_params(&src[i], &dst[i], flags);
 }
 
 static int find_matching_input(struct emc_table *table, struct emc_sel *sel)
@@ -2249,6 +1288,62 @@ static int find_matching_input(struct emc_table *table, struct emc_sel *sel)
 	return 0;
 }
 
+static void parse_dt_data(struct platform_device *pdev)
+{
+	u32 prop;
+	int ret;
+	bool has_derated_tables = false;
+	struct device_node *table_node = NULL;
+	struct resource r;
+	int i;
+
+	ret = of_property_read_u32(pdev->dev.of_node, "max-clock-frequency",
+				   &prop);
+	if (!ret)
+		emc_max_rate = prop * 1000;
+
+	if (of_find_property(pdev->dev.of_node, "has-derated-tables", NULL))
+		has_derated_tables = true;
+
+	table_node = of_find_matching_node(pdev->dev.of_node, emc_table_match);
+	if (!table_node) {
+		dev_err(&pdev->dev, "Can not find EMC table node\n");
+		return;
+	}
+
+	if (of_address_to_resource(table_node, 0, &r)) {
+		dev_err(&pdev->dev, "Can not map EMC table\n");
+		return;
+	}
+
+	tegra_emc_table_normal = devm_ioremap_resource(&pdev->dev, &r);
+	tegra_emc_table_size = resource_size(&r) / sizeof(struct emc_table);
+
+	if (has_derated_tables) {
+		tegra_emc_table_size /= 2;
+		tegra_emc_table_derated = tegra_emc_table_normal +
+					  tegra_emc_table_size;
+
+		for (i = 0; i < tegra_emc_table_size; i++) {
+			if (tegra_emc_table_derated[i].rate !=
+			    tegra_emc_table_normal[i].rate) {
+				dev_err(&pdev->dev, "EMC table check failed\n");
+				tegra_emc_table_normal = NULL;
+				tegra_emc_table_derated = NULL;
+				tegra_emc_table_size = 0;
+				break;
+			}
+		}
+	}
+
+	if (tegra_dram_type == DRAM_TYPE_LPDDR4 && tegra_emc_table_derated)
+		emc_copy_table_params(tegra_emc_table_normal,
+				      tegra_emc_table_derated,
+				      tegra_emc_table_size,
+				      EMC_COPY_TABLE_PARAM_PERIODIC_FIELDS |
+				      EMC_COPY_TABLE_PARAM_TRIM_REGS);
+}
+
 static int tegra210_init_emc_data(struct platform_device *pdev)
 {
 	int i;
@@ -2292,8 +1387,7 @@ static int tegra210_init_emc_data(struct platform_device *pdev)
 		return -ENODATA;
 	}
 
-	tegra_emc_dt_parse_pdata(pdev, &tegra_emc_table_normal,
-			&tegra_emc_table_derated, &tegra_emc_table_size);
+	parse_dt_data(pdev);
 	if (!tegra_emc_table_size ||
 	    tegra_emc_table_size > TEGRA_EMC_TABLE_MAX_SIZE) {
 		dev_err(&pdev->dev, "Invalid table size %d\n",
@@ -2301,18 +1395,6 @@ static int tegra210_init_emc_data(struct platform_device *pdev)
 		return -EINVAL;
 	}
 	tegra_emc_table = tegra_emc_table_normal;
-
-	/*
-	 * Copy trained trimmers from the normal table to the derated
-	 * table for LP4. Bootloader trains only the normal table.
-	 * Trimmers are the same for derated and normal tables.
-	 */
-	if (tegra_emc_table_derated && tegra_dram_type == DRAM_TYPE_LPDDR4)
-		emc_copy_table_params(tegra_emc_table_normal,
-				      tegra_emc_table_derated,
-				      tegra_emc_table_size,
-				      EMC_COPY_TABLE_PARAM_PERIODIC_FIELDS |
-				      EMC_COPY_TABLE_PARAM_TRIM_REGS);
 
 	seq = supported_seqs;
 	while (seq->table_rev) {
@@ -2419,33 +1501,10 @@ static int tegra210_emc_probe(struct platform_device *pdev)
 		return ret;
 
 	tegra_emc_init_done = true;
-#ifdef CONFIG_DEBUG_FS
+
 	tegra_emc_debug_init();
-#endif
 
 	return 0;
-}
-
-static int tegra210b01_emc_probe(struct platform_device *pdev)
-{
-	emc_override_clk = devm_clk_get(&pdev->dev, "emc_override");
-	if (IS_ERR(emc_override_clk)) {
-		dev_err(&pdev->dev, "Cannot find T210B01 EMC override clock\n");
-		return -ENODATA;
-	}
-
-	dev_info(&pdev->dev, "T210B01 EMC pm ops are registered\n");
-	return 0;
-}
-
-static int tegra210x_emc_probe(struct platform_device *pdev)
-{
-	struct device_node *np = pdev->dev.of_node;
-
-	if (of_device_is_compatible(np, "nvidia,tegra210b01-emc"))
-		return tegra210b01_emc_probe(pdev);
-
-	return tegra210_emc_probe(pdev);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -2455,9 +1514,6 @@ static int tegra210_emc_suspend(struct device *dev)
 		emc_override_rate = clk_get_rate(emc_override_clk);
 		clk_set_rate(emc_override_clk, 204000000);
 		clk_prepare_enable(emc_override_clk);
-
-		pr_debug("%s at rate %lu\n",
-			 __func__, clk_get_rate(emc_override_clk));
 	}
 
 	return 0;
@@ -2468,21 +1524,17 @@ static int tegra210_emc_resume(struct device *dev)
 	if (!IS_ERR(emc_override_clk)) {
 		clk_set_rate(emc_override_clk, emc_override_rate);
 		clk_disable_unprepare(emc_override_clk);
-
-		pr_debug("%s at rate %lu\n",
-			 __func__, clk_get_rate(emc_override_clk));
 	}
 	return 0;
 }
 #endif
 
 static const struct dev_pm_ops tegra210_emc_pm_ops = {
-	SET_LATE_SYSTEM_SLEEP_PM_OPS(tegra210_emc_suspend, tegra210_emc_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(tegra210_emc_suspend, tegra210_emc_resume)
 };
 
 static struct of_device_id tegra210_emc_of_match[] = {
 	{ .compatible = "nvidia,tegra210-emc", },
-	{ .compatible = "nvidia,tegra210b01-emc", },
 	{ },
 };
 
@@ -2492,7 +1544,7 @@ static struct platform_driver tegra210_emc_driver = {
 		.of_match_table = tegra210_emc_of_match,
 		.pm	= &tegra210_emc_pm_ops,
 	},
-	.probe          = tegra210x_emc_probe,
+	.probe          = tegra210_emc_probe,
 };
 
 static int __init tegra210_emc_init(void)
@@ -2526,64 +1578,3 @@ static int __init tegra210_emc_late_init(void)
 	return 0;
 }
 late_initcall(tegra210_emc_late_init);
-
-#ifdef CONFIG_THERMAL
-
-#define TEGRA_DRAM_THERM_MAX_STATE     1
-
-static int tegra_dram_cd_max_state(struct thermal_cooling_device *tcd,
-				   unsigned long *state)
-{
-	*state = TEGRA_DRAM_THERM_MAX_STATE;
-	return 0;
-}
-
-static int tegra_dram_cd_cur_state(struct thermal_cooling_device *tcd,
-				   unsigned long *state)
-{
-	*state = (unsigned long)atomic_read(&mr4_temp_poll);
-	return 0;
-}
-
-static int tegra_dram_cd_set_state(struct thermal_cooling_device *tcd,
-				   unsigned long state)
-{
-	if (state == (unsigned long)atomic_read(&mr4_temp_poll))
-		return 0;
-
-	if (state)
-		tegra_emc_mr4_temp_trigger(1);
-	else
-		tegra_emc_mr4_temp_trigger(0);
-	return 0;
-}
-
-/*
- * Cooling device support.
- */
-static struct thermal_cooling_device_ops emc_dram_cd_ops = {
-	.get_max_state = tegra_dram_cd_max_state,
-	.get_cur_state = tegra_dram_cd_cur_state,
-	.set_cur_state = tegra_dram_cd_set_state,
-};
-
-static __init int tegra_emc_therm_init(void)
-{
-	void *ret;
-
-	if (!tegra_emc_init_done)
-		return -ENODEV;
-
-	ret = thermal_cooling_device_register("tegra-dram", NULL,
-					      &emc_dram_cd_ops);
-	if (IS_ERR(ret))
-		return PTR_ERR(ret);
-	if (ret == NULL)
-		return -ENODEV;
-
-	pr_info("DRAM derating cdev registered.\n");
-
-	return 0;
-}
-late_initcall(tegra_emc_therm_init);
-#endif
