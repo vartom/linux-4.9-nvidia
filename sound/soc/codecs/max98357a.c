@@ -56,7 +56,7 @@ static const struct snd_soc_dapm_widget max98357a_dapm_widgets[] = {
 };
 
 static const struct snd_soc_dapm_route max98357a_dapm_routes[] = {
-	{"Speaker", NULL, "HiFi Playback"},
+	{"Speaker", NULL, "Playback"},
 };
 
 static int max98357a_codec_probe(struct snd_soc_codec *codec)
@@ -87,9 +87,9 @@ static const struct snd_soc_dai_ops max98357a_dai_ops = {
 };
 
 static struct snd_soc_dai_driver max98357a_dai_driver = {
-	.name = "HiFi",
+	.name = "max98357a-hifi",
 	.playback = {
-		.stream_name	= "HiFi Playback",
+		.stream_name	= "Playback",
 		.formats	= SNDRV_PCM_FMTBIT_S16 |
 					SNDRV_PCM_FMTBIT_S24 |
 					SNDRV_PCM_FMTBIT_S32,
